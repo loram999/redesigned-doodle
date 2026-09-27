@@ -70,7 +70,7 @@ except Exception:
 # ======================================================================
 #  CONFIG
 # ======================================================================
-BOT_TOKEN = "8730619020:AAGilrqLMc_dNwyVeX46bx3r0xWwQM0fOVk"
+BOT_TOKEN = "8730619020:AAGptmWWo0UisEMSYPTFU29dSBrjNqVZwq8"
 OWNER_ID = 8353748526
 ADMIN_IDS = {8353748526}
 BOT_NAME = "OXIDE"
@@ -93,6 +93,31 @@ NEED_ACCESS_MSG = (
     "{crown} REDEEM THE KEY\n"
     "{thumb} BUY " + BUY_CONTACT
 )
+
+
+# ======================================================================
+#  PLANS / PAYMENT / REFERRAL
+# ======================================================================
+PLANS = {
+    "1": {"name": "1 DAY",  "days": 1,  "price": 1000,  "tag": "STARTER"},
+    "2": {"name": "7 DAYS", "days": 7,  "price": 5000,  "tag": "BASIC"},
+    "3": {"name": "30 DAYS","days": 30, "price": 20000, "tag": "PRO"},
+    "4": {"name": "ADMIN PLAN", "days": 30, "price": 40000, "tag": "ADMIN"},
+}
+
+WAVE_PAY = {
+    "name": "PHYUPHYUWIN",
+    "number": "09758676468",
+}
+
+KBZ_PAY = {
+    "name": "Daw Khin Than Swe",
+    "number": "09258810660",
+}
+
+# Referral: 1 refer = 1 free checking (for ANY user, once per referred user)
+REFERRAL_REWARD_CHECKS = 1
+
 
 GEN_CHUNK_SIZE = 5000
 GEN_MAX_UNLIMITED = 500_000_000
@@ -177,6 +202,16 @@ try:
 except Exception:
     pass
 
+# Detect inline icon_custom_emoji_id support
+_ICON_CUSTOM_EMOJI_SUPPORTED = False
+try:
+    import inspect as _ic_inspect
+    _ic_sig = _ic_inspect.signature(InlineKeyboardButton.__init__)
+    _ICON_CUSTOM_EMOJI_SUPPORTED = "icon_custom_emoji_id" in _ic_sig.parameters
+except Exception:
+    _ICON_CUSTOM_EMOJI_SUPPORTED = False
+
+
 
 def KButton(text, style=None, icon_custom_emoji_id=None):
     """Build a KeyboardButton with optional style and premium icon."""
@@ -205,13 +240,15 @@ def KButton(text, style=None, icon_custom_emoji_id=None):
             return KeyboardButton(text=text)
 
 
-def IButton(text, callback_data=None, url=None, style=None):
-    """Build InlineKeyboardButton with optional style.
+def IButton(text, callback_data=None, url=None, style=None, icon_custom_emoji_id=None):
+    """Build InlineKeyboardButton with optional style + premium icon.
     
-    Style options (Telegram Bot API 9.4+):
-        "danger"  — red
-        "success" — green
-        "primary" — blue
+    Args:
+        text: Button text
+        callback_data: Callback data
+        url: URL to open
+        style: "danger" / "success" / "primary" (Bot API 9.4+)
+        icon_custom_emoji_id: Premium emoji ID (Bot API 8.3+)
     """
     kwargs = {"text": text}
     if callback_data is not None:
@@ -219,20 +256,33 @@ def IButton(text, callback_data=None, url=None, style=None):
     if url is not None:
         kwargs["url"] = url
 
-    # Add style if supported
+    # Style support
     if _INLINE_STYLE_SUPPORTED and style:
         kwargs["style"] = style
 
-    # Try full first
+    # Icon support
+    if icon_custom_emoji_id and _ICON_CUSTOM_EMOJI_SUPPORTED:
+        kwargs["icon_custom_emoji_id"] = str(icon_custom_emoji_id)
+
+    # Try full
     try:
         return InlineKeyboardButton(**kwargs)
     except Exception as e:
-        # Fallback: remove style
-        kwargs.pop("style", None)
+        print(f"[IBUTTON] full fail: {e}")
+        # Try without icon
+        kwargs.pop("icon_custom_emoji_id", None)
         try:
             return InlineKeyboardButton(**kwargs)
-        except Exception:
-            return InlineKeyboardButton(text=text, callback_data=callback_data)
+        except Exception as e2:
+            print(f"[IBUTTON] no-icon fail: {e2}")
+            # Try without style
+            kwargs.pop("style", None)
+            try:
+                return InlineKeyboardButton(**kwargs)
+            except Exception as e3:
+                print(f"[IBUTTON] text-only fail: {e3}")
+                return InlineKeyboardButton(text=text, callback_data=callback_data)
+
 
 
 class MLBBDeviceIDGenerator:
@@ -429,10 +479,21 @@ def make_tier_breakdown_image(players, title="TIER BREAKDOWN", check_label=None)
         if _is_hidden_tier_user(base):
             continue
         base_counter[full or "No Tier"] += 1
-    sections = [("Collector Tier",
-                 sorted(base_counter.items(),
-                        key=lambda x: (-x[1],
-                                       _base_sort_key(_normalize_collector_tier(x[0])[0]))))]
+
+    # Sort by TIER RANK (highest tier first) then count desc
+    def _tier_sort_key(item):
+        tier_name, cnt = item
+        base, roman, full = _normalize_collector_tier(tier_name)
+        # Tier base order (higher = better) - reverse for descending
+        base_rank = _base_sort_key(base)  # 0=Amateur, 9=No Tier
+        # Convert to descending (higher tier = smaller rank)
+        base_score = 999 - base_rank
+        # Roman numeral (higher = better)
+        roman_score = ROMAN_ORDER.get(roman, 0)
+        return (-base_score, -roman_score, -cnt)
+
+    sorted_tiers = sorted(base_counter.items(), key=_tier_sort_key)
+    sections = [("Collector Tier", sorted_tiers)]
     return render_breakdown_image(title, sections, check_label=check_label)
 
 
@@ -444,7 +505,34 @@ def make_rank_breakdown_image(players, title="RANK BREAKDOWN", check_label=None)
             continue
         rank = pd.get("high_rank") or pd.get("current_rank") or "Unknown"
         rank_counter[rank] += 1
-    sections = [("High Rank", sorted(rank_counter.items(), key=lambda x: -x[1]))]
+
+    # Rank order: Mythical Immortal (highest) → Unranked (lowest)
+    RANK_ORDER = {
+        "Mythical Immortal": 100,
+        "Mythical Glory":    90,
+        "Mythical Honor":    80,
+        "Mythic":            70,
+        "Legend":            60,
+        "Epic":              50,
+        "Grandmaster":       40,
+        "Master":            30,
+        "Elite":             20,
+        "Warrior":           10,
+        "Unranked":          0,
+        "Unknown":           -1,
+    }
+
+    def _rank_sort_key(item):
+        rank_name, cnt = item
+        # Extract base name (remove ★ and division)
+        base = rank_name.split("(")[0].strip()
+        for key in RANK_ORDER:
+            if key.lower() in base.lower():
+                return (-RANK_ORDER[key], -cnt)
+        return (-RANK_ORDER["Unknown"], -cnt)
+
+    sorted_ranks = sorted(rank_counter.items(), key=_rank_sort_key)
+    sections = [("High Rank", sorted_ranks)]
     return render_breakdown_image(title, sections, check_label=check_label)
 
 
@@ -462,12 +550,37 @@ def make_full_breakdown_image(players, title="FULL BREAKDOWN", check_label=None)
         v2l_counter[pd.get("v2l_status", "N/A") or "N/A"] += 1
         days = _offline_days(pd.get("last_login_ts", 0))
         offline_counter[_bucket_offline(days)] += 1
+    # Tier sort (high→low)
+    def _tier_key(item):
+        tier_name, cnt = item
+        base, roman, full = _normalize_collector_tier(tier_name)
+        base_rank = _base_sort_key(base)
+        return (-(999 - base_rank), -ROMAN_ORDER.get(roman, 0), -cnt)
+
+    # Rank sort (high→low)
+    RANK_ORDER = {
+        "Mythical Immortal": 100, "Mythical Glory": 90, "Mythical Honor": 80,
+        "Mythic": 70, "Legend": 60, "Epic": 50, "Grandmaster": 40,
+        "Master": 30, "Elite": 20, "Warrior": 10, "Unranked": 0, "Unknown": -1,
+    }
+    def _rank_key(item):
+        rank_name, cnt = item
+        base = rank_name.split("(")[0].strip()
+        for key in RANK_ORDER:
+            if key.lower() in base.lower():
+                return (-RANK_ORDER[key], -cnt)
+        return (-RANK_ORDER["Unknown"], -cnt)
+
+    # V2L sort (Enabled → Disabled → N/A)
+    V2L_ORDER = {"Enabled": 3, "Disabled": 2, "N/A": 1}
+    def _v2l_key(item):
+        v2l_name, cnt = item
+        return (-V2L_ORDER.get(v2l_name, 0), -cnt)
+
     sections = [
-        ("Collector Tier", sorted(base_counter.items(),
-                                   key=lambda x: (-x[1],
-                                                  _base_sort_key(_normalize_collector_tier(x[0])[0])))),
-        ("High Rank", sorted(rank_counter.items(), key=lambda x: -x[1])),
-        ("V2L Status", sorted(v2l_counter.items(), key=lambda x: -x[1])),
+        ("Collector Tier", sorted(base_counter.items(), key=_tier_key)),
+        ("High Rank", sorted(rank_counter.items(), key=_rank_key)),
+        ("V2L Status", sorted(v2l_counter.items(), key=_v2l_key)),
         ("Offline Days", sorted(offline_counter.items(), key=lambda x: x[0])),
     ]
     return render_breakdown_image(title, sections, check_label=check_label)
@@ -2468,6 +2581,193 @@ def build_hit_txt(device_id, role_id, zone_id, pd, banned_status=None):
 _db_lock = threading.Lock()
 
 
+# ======================================================================
+#  PLANS / PAYMENT DB
+# ======================================================================
+def db_create_pending_payment(user_id, plan_key, pay_method, screenshot_file_id):
+    """Create a pending payment record."""
+    plan = PLANS.get(plan_key)
+    if not plan:
+        return None
+    now = int(time.time())
+    with _db_lock, sqlite3.connect(DB_PATH) as c:
+        cur = c.execute("""INSERT INTO pending_payments
+            (user_id, plan_key, plan_name, plan_days, plan_price,
+             pay_method, screenshot_file_id, status, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?)""",
+            (user_id, plan_key, plan["name"], plan["days"], plan["price"],
+             pay_method, screenshot_file_id, "PENDING", now))
+        return cur.lastrowid
+
+
+def db_get_pending_payment(payment_id):
+    with _db_lock, sqlite3.connect(DB_PATH) as c:
+        row = c.execute("""SELECT id, user_id, plan_key, plan_name, plan_days,
+            plan_price, pay_method, screenshot_file_id, status, created_at,
+            reviewed_at, reviewed_by, note
+            FROM pending_payments WHERE id=?""", (payment_id,)).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0], "user_id": row[1], "plan_key": row[2],
+        "plan_name": row[3], "plan_days": row[4], "plan_price": row[5],
+        "pay_method": row[6], "screenshot_file_id": row[7],
+        "status": row[8], "created_at": row[9],
+        "reviewed_at": row[10], "reviewed_by": row[11], "note": row[12],
+    }
+
+
+def db_update_payment_status(payment_id, status, reviewer_id=0, note=""):
+    now = int(time.time())
+    with _db_lock, sqlite3.connect(DB_PATH) as c:
+        c.execute("""UPDATE pending_payments
+            SET status=?, reviewed_at=?, reviewed_by=?, note=?
+            WHERE id=?""",
+            (status, now, reviewer_id, note, payment_id))
+
+
+def db_list_pending_payments(limit=30):
+    with _db_lock, sqlite3.connect(DB_PATH) as c:
+        rows = c.execute("""SELECT id, user_id, plan_name, plan_price,
+            pay_method, created_at FROM pending_payments
+            WHERE status='PENDING' ORDER BY created_at DESC LIMIT ?""",
+            (limit,)).fetchall()
+    return rows
+
+
+def db_list_all_payments(limit=100):
+    with _db_lock, sqlite3.connect(DB_PATH) as c:
+        rows = c.execute("""SELECT id, user_id, plan_name, plan_price,
+            pay_method, status, created_at FROM pending_payments
+            ORDER BY created_at DESC LIMIT ?""", (limit,)).fetchall()
+    return rows
+
+
+# ======================================================================
+#  REFERRAL DB
+# ======================================================================
+def db_set_referral(user_id, referrer_id):
+    """Record referral AND reward referrer IMMEDIATELY.
+    Returns True if referral was recorded."""
+    if user_id == referrer_id:
+        print(f"[REF] Self-referral blocked: {user_id}")
+        return False
+    now = int(time.time())
+    with _db_lock, sqlite3.connect(DB_PATH) as c:
+        # Check if already referred
+        row = c.execute("SELECT referrer_id FROM user_referral WHERE user_id=?",
+                        (user_id,)).fetchone()
+        if row:
+            print(f"[REF] User {user_id} already referred by {row[0]}")
+            return False
+        # Check referrer exists
+        ref_row = c.execute("SELECT user_id FROM users WHERE user_id=?",
+                            (referrer_id,)).fetchone()
+        if not ref_row:
+            print(f"[REF] Referrer {referrer_id} not in users table")
+            return False
+        # Insert referral record — REWARDED IMMEDIATELY
+        c.execute("""INSERT INTO user_referral(user_id, referrer_id, referred_at, rewarded)
+                     VALUES (?, ?, ?, 1)""", (user_id, referrer_id, now))
+        # Update referrer stats immediately
+        c.execute("""INSERT INTO referral_stats(user_id, total_referrals, checks_earned, checks_used)
+                     VALUES (?, 1, 1, 0)
+                     ON CONFLICT(user_id) DO UPDATE SET
+                        total_referrals = total_referrals + 1,
+                        checks_earned = checks_earned + 1""",
+                  (referrer_id,))
+    print(f"[REF] ✅ Rewarded referrer {referrer_id} (+1) — from user {user_id}")
+    return True
+
+
+
+def db_get_referrer(user_id):
+    with _db_lock, sqlite3.connect(DB_PATH) as c:
+        row = c.execute("SELECT referrer_id, rewarded FROM user_referral WHERE user_id=?",
+                        (user_id,)).fetchone()
+    if not row:
+        return None
+    return {"referrer_id": row[0], "rewarded": row[1]}
+
+
+def db_reward_referrer(user_id, reward_checks=1):
+    """Called when a referred user does their FIRST check.
+    Reward the referrer with free check credits.
+    Returns referrer_id on success, None on failure."""
+    now = int(time.time())
+    with _db_lock, sqlite3.connect(DB_PATH) as c:
+        # 1. Get referral record
+        row = c.execute(
+            "SELECT referrer_id, rewarded FROM user_referral WHERE user_id=?",
+            (user_id,)).fetchone()
+        if not row:
+            print(f"[REF] No referral record for user {user_id}")
+            return None
+        referrer_id, rewarded = row
+        if rewarded:
+            print(f"[REF] User {user_id} already rewarded referrer {referrer_id}")
+            return None
+
+        # 2. Mark as rewarded
+        c.execute("UPDATE user_referral SET rewarded=1 WHERE user_id=?", (user_id,))
+
+        # 3. Update referrer stats (insert or update)
+        c.execute("""INSERT INTO referral_stats(user_id, total_referrals, checks_earned, checks_used)
+                     VALUES (?, 1, ?, 0)
+                     ON CONFLICT(user_id) DO UPDATE SET
+                        total_referrals = total_referrals + 1,
+                        checks_earned = checks_earned + ?""",
+                  (referrer_id, reward_checks, reward_checks))
+
+    print(f"[REF] ✅ Referrer {referrer_id} rewarded +{reward_checks} (from user {user_id})")
+    return referrer_id
+
+
+
+def db_get_referral_stats(user_id):
+    """Get referral stats. Always returns valid dict."""
+    try:
+        with _db_lock, sqlite3.connect(DB_PATH) as c:
+            row = c.execute("""SELECT total_referrals, checks_earned, checks_used
+                FROM referral_stats WHERE user_id=?""", (user_id,)).fetchone()
+    except Exception as e:
+        print(f"[REF] stats query fail: {e}")
+        return {"total_referrals": 0, "checks_earned": 0, "checks_used": 0}
+    if not row:
+        return {"total_referrals": 0, "checks_earned": 0, "checks_used": 0}
+    return {
+        "total_referrals": int(row[0] or 0),
+        "checks_earned": int(row[1] or 0),
+        "checks_used": int(row[2] or 0),
+    }
+
+
+def db_use_referral_credit(user_id):
+    """Use 1 referral credit for a check."""
+    with _db_lock, sqlite3.connect(DB_PATH) as c:
+        row = c.execute("""SELECT checks_earned, checks_used
+            FROM referral_stats WHERE user_id=?""", (user_id,)).fetchone()
+        if not row:
+            return False
+        earned, used = row
+        if used >= earned:
+            return False
+        c.execute("""UPDATE referral_stats SET checks_used = checks_used + 1
+                     WHERE user_id=?""", (user_id,))
+    return True
+
+
+def db_has_referral_credit(user_id):
+    stats = db_get_referral_stats(user_id)
+    return stats["checks_used"] < stats["checks_earned"]
+
+
+def db_count_referrals(user_id):
+    stats = db_get_referral_stats(user_id)
+    return stats["total_referrals"]
+
+
+
 def db_init():
     with sqlite3.connect(DB_PATH) as c:
         c.executescript("""
@@ -2506,6 +2806,31 @@ def db_init():
         CREATE TABLE IF NOT EXISTS extra_admins (
             user_id INTEGER PRIMARY KEY,
             added_by INTEGER, added_at INTEGER, note TEXT
+        );
+        CREATE TABLE IF NOT EXISTS pending_payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER, plan_key TEXT, plan_name TEXT, plan_days INTEGER,
+            plan_price INTEGER, pay_method TEXT,
+            screenshot_file_id TEXT,
+            status TEXT DEFAULT 'PENDING',
+            created_at INTEGER, reviewed_at INTEGER, reviewed_by INTEGER,
+            note TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_pending_user ON pending_payments(user_id);
+        CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_payments(status);
+
+        CREATE TABLE IF NOT EXISTS user_referral (
+            user_id INTEGER PRIMARY KEY,
+            referrer_id INTEGER DEFAULT 0,
+            referred_at INTEGER DEFAULT 0,
+            rewarded INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS referral_stats (
+            user_id INTEGER PRIMARY KEY,
+            total_referrals INTEGER DEFAULT 0,
+            checks_earned INTEGER DEFAULT 0,
+            checks_used INTEGER DEFAULT 0
         );
         """)
         for stmt in [
@@ -2832,19 +3157,57 @@ def db_user_access_summary(user_id):
     return "\n".join(lines)
 
 
+def _should_use_referral_credit(user_id):
+    """Return True if user has NO trial/key access but HAS referral credit.
+    Only then use referral credit."""
+    if user_id in ADMIN_IDS:
+        return False
+    a = db_get_access(user_id)
+    now = int(time.time())
+    # If trial or key active — DO NOT consume
+    if a["key_active"] and a["key_until"] > now:
+        return False
+    if a["trial_until"] > now:
+        return False
+    # Only consume if referral credit available
+    try:
+        return db_has_referral_credit(user_id)
+    except Exception:
+        return False
+
+
+def _consume_one_credit(user_id):
+    """Consume 1 referral credit for this user. Returns True if success."""
+    try:
+        return db_use_referral_credit(user_id)
+    except Exception:
+        return False
+
+
+
 def has_access(user_id) -> bool:
+    """Check access. Priority: Admin > Key > Trial > Referral credit."""
     if user_id in ADMIN_IDS:
         return True
     a = db_get_access(user_id)
     now = int(time.time())
-    if a["trial_until"] > now:
-        return True
+    # 1. Key active
     if a["key_active"] and a["key_until"] > now:
         return True
+    # 2. Trial active
+    if a["trial_until"] > now:
+        return True
+    # 3. Referral credit (ONLY if trial/key expired)
+    try:
+        if db_has_referral_credit(user_id):
+            return True
+    except Exception:
+        pass
     return False
 
 
 def access_remaining_seconds(user_id):
+    """Return seconds remaining. Referral credit excluded."""
     if user_id in ADMIN_IDS:
         return None
     a = db_get_access(user_id)
@@ -2853,6 +3216,7 @@ def access_remaining_seconds(user_id):
         return a["key_until"] - now
     if a["trial_until"] > now:
         return a["trial_until"] - now
+    # Referral credit — return 0 (no time-based remaining)
     return 0
 
 
@@ -2945,6 +3309,27 @@ PREMIUM_EMOJI_IDS = {
     "pill":        "5463081281048818043",
     "rock":        "5463412289883353404",
     "hurt":        "5463156928307801722",
+
+    # Plans/Payment batch
+    "poop":        "5465198330558557107",
+    "hurt2":       "5463156928307801722",
+    "pill2":       "5463081281048818043",
+    "question":    "5463139580934892960",
+    "arrow_up":    "5463122435425448565",
+    "hand2":       "5454380420336466255",
+    "mail2":       "5454113432284446338",
+    "battery2":    "5454125707300978880",
+    "snow2":       "6109667871359504367",
+    "arrow_down":  "6109670413980143882",
+    "skull2":      "6109618960271938596",
+    "gift":        "6111646940749893724",
+    "tree":        "6109409778184753666",
+    "dice":        "5965520028647298638",
+    "star2":       "5974032542158819944",
+    "wave_pay":    "6075371900370951745",
+    "kbz_pay":     "6075379377909012804",
+
+    "diamond":   "5471952986970267163",
 }
 
 # Fallback unicode emoji
@@ -3015,6 +3400,27 @@ PREMIUM_EMOJI_FALLBACK = {
     "pill":        "\U0001F48A",
     "rock":        "\U0001F91F",
     "hurt":        "\U0001F915",
+
+    # Plans/Payment batch
+    "poop":        "\U0001F4A9",
+    "hurt2":       "\U0001F915",
+    "pill2":       "\U0001F48A",
+    "question":    "\u2753",
+    "arrow_up":    "\u2B06\uFE0F",
+    "hand2":       "\u270B",
+    "mail2":       "\u2709\uFE0F",
+    "battery2":    "\U0001F50B",
+    "snow2":       "\u2744\uFE0F",
+    "arrow_down":  "\u2B07\uFE0F",
+    "skull2":      "\U0001F480",
+    "gift":        "\U0001F381",
+    "tree":        "\U0001F384",
+    "dice":        "\U0001F3B2",
+    "star2":       "\U0001F31F",
+    "wave_pay":    "\u2B50",
+    "kbz_pay":     "\U0001F1F2\U0001F1F2",
+
+    "diamond":   "\U0001F48E",
 }
 
 
@@ -3066,10 +3472,15 @@ async def _check_joined_all(ctx, user_id):
 
 
 def _force_join_keyboard():
+    _E = PREMIUM_EMOJI_IDS
     rows = []
     for ch in FORCE_CHANNELS:
-        rows.append([IButton(f"Join {ch['name']}", url=ch["url"], style="success")])
-    rows.append([IButton("I'VE JOINED", callback_data="fj_check", style="primary")])
+        rows.append([IButton(f"Join {ch['name']}", url=ch["url"],
+                             style="success",
+                             icon_custom_emoji_id=_E.get("ok"))])
+    rows.append([IButton("I'VE JOINED", callback_data="fj_check",
+                         style="primary",
+                         icon_custom_emoji_id=_E.get("handshake"))])
     return InlineKeyboardMarkup(rows)
 
 
@@ -3208,14 +3619,24 @@ async def _send_tier_image_auto(app, chat_id, players, title, check_label):
         if img_path and os.path.isfile(img_path):
             sent_ok = False
             try:
+                _cap_txt, _cap_ents = fmt_premium(
+                    f"{{party}} TIER BREAKDOWN {{party}}\n"
+                    f"{{crown}} Info hits: {len(players)}\n"
+                    f"{{thumb}} DEV - {DEV_TAG}")
                 with open(img_path, "rb") as photo:
-                    await app.bot.send_photo(
-                        chat_id=chat_id,
-                        photo=photo,
-                        caption=(f"\U0001F4CA TIER BREAKDOWN\n"
-                                 f"Info hits: {len(players)}\n"
-                                 f"DEV - {DEV_TAG}")
-                    )
+                    if _cap_ents:
+                        await app.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=photo,
+                            caption=_cap_txt,
+                            caption_entities=_cap_ents
+                        )
+                    else:
+                        await app.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=photo,
+                            caption=_cap_txt
+                        )
                 sent_ok = True
                 print(f"[TIER IMG] {title}: SENT OK")
             except Exception as e:
@@ -3367,17 +3788,33 @@ async def _live_status_loop(app, chat_id, jid, message_id, label, stop_event):
 
 
 async def _live_status_final(app, chat_id, message_id, jid, label, final_text=None):
+    """Edit live message to final DONE/STOPPED. Handles tuple AND string."""
     try:
         if final_text:
-            txt, ents = fmt_premium(final_text)
+            # final_text is placeholder string — run through fmt_premium
+            result = fmt_premium(final_text)
         else:
             j = job_get(jid)
             if j:
-                txt, ents = _build_live_status_text(j, label=label)
-                txt = txt.replace("RUNNING", "DONE")
+                result = _build_live_status_text(j, label=label)
             else:
-                txt, ents = fmt_premium(f"{{ok}} {label} DONE")
+                result = fmt_premium(f"{{ok}} {label} DONE")
 
+        # Handle both tuple (text, entities) and string
+        if isinstance(result, tuple):
+            txt, ents = result
+        else:
+            txt = str(result)
+            ents = []
+
+        # Ensure txt is str
+        if not isinstance(txt, str):
+            txt = str(txt)
+
+        # Replace RUNNING → DONE (safe now)
+        txt = txt.replace("RUNNING", "DONE")
+
+        # Send
         try:
             if ents:
                 await app.bot.edit_message_text(
@@ -3391,8 +3828,6 @@ async def _live_status_final(app, chat_id, message_id, jid, label, final_text=No
                 print(f"[LIVE] final edit fail: {type(e).__name__}: {e}")
     except Exception as e:
         print(f"[LIVE] final outer fail: {type(e).__name__}: {e}")
-
-
 
 
 
@@ -3555,6 +3990,53 @@ async def send_premium_msg(bot, chat_id, text, emoji_map=None, **kwargs):
 
 
 
+def kb_plans():
+    _E = PREMIUM_EMOJI_IDS
+    return ReplyKeyboardMarkup(
+        [[KButton("SELECT PLAN", style="success", icon_custom_emoji_id=_E.get("dice"))],
+         [KButton("BACK", style="danger", icon_custom_emoji_id=_E.get("cool"))]],
+        resize_keyboard=True)
+
+
+def kb_referral():
+    _E = PREMIUM_EMOJI_IDS
+    return ReplyKeyboardMarkup(
+        [[KButton("MY REFERRALS", style="primary", icon_custom_emoji_id=_E.get("star2"))],
+         [KButton("BACK", style="danger", icon_custom_emoji_id=_E.get("cool"))]],
+        resize_keyboard=True)
+
+
+def kb_payment_methods(plan_key):
+    """Inline: Wave Pay + KBZ Pay with premium icons"""
+    _E = PREMIUM_EMOJI_IDS
+    return InlineKeyboardMarkup([
+        [
+            IButton("WAVE PAY", callback_data=f"pay_wave_{plan_key}",
+                    style="primary",
+                    icon_custom_emoji_id=_E.get("wave_pay")),
+            IButton("KBZ PAY", callback_data=f"pay_kbz_{plan_key}",
+                    style="success",
+                    icon_custom_emoji_id=_E.get("kbz_pay")),
+        ],
+    ])
+
+
+def kb_admin_payment_review(payment_id):
+    """Inline: Approve + Reject for admin."""
+    _E = PREMIUM_EMOJI_IDS
+    return InlineKeyboardMarkup([
+        [
+            IButton("APPROVE", callback_data=f"pay_approve_{payment_id}",
+                    style="success",
+                    icon_custom_emoji_id=_E.get("ok")),
+            IButton("REJECT", callback_data=f"pay_reject_{payment_id}",
+                    style="danger",
+                    icon_custom_emoji_id=_E.get("nono")),
+        ],
+    ])
+
+
+
 def kb_main(is_admin_user=False):
     _E = PREMIUM_EMOJI_IDS
     rows = [
@@ -3570,8 +4052,9 @@ def kb_main(is_admin_user=False):
     ]
     if is_admin_user:
         rows.append([KButton("ADMIN PANEL", style="danger", icon_custom_emoji_id=_E.get("ghost"))])
-    rows.append([KButton("HELP", style="primary", icon_custom_emoji_id=_E.get("thumb")),
-                 KButton("CANCEL", style="danger", icon_custom_emoji_id=_E.get("nono"))])
+    rows.append([KButton("PLANS", style="success", icon_custom_emoji_id=_E.get("gift")),
+                 KButton("REFERRAL", style="primary", icon_custom_emoji_id=_E.get("star2"))])
+    rows.append([KButton("HELP", style="primary", icon_custom_emoji_id=_E.get("thumb"))])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False)
 
 
@@ -3782,9 +4265,11 @@ def _resolve_image_token(token):
 
 
 def _single_image_keyboard(device_id):
+    _E = PREMIUM_EMOJI_IDS
     token = _get_image_token(device_id)
     return InlineKeyboardMarkup([
-        [IButton("IMAGE", callback_data=token, style="primary")]
+        [IButton("IMAGE", callback_data=token, style="primary",
+                 icon_custom_emoji_id=_E.get("screen"))]
     ])
 
 
@@ -4060,6 +4545,16 @@ async def cmd_start(update: Update, ctx):
         return
     uid = update.effective_user.id
     db_ensure_user(uid, update.effective_user.username or "")
+
+    # Handle referral start
+    if ctx.args and len(ctx.args) > 0 and ctx.args[0].startswith("ref_"):
+        try:
+            referrer_id = int(ctx.args[0].replace("ref_", ""))
+            if db_set_referral(uid, referrer_id):
+                print(f"[REF] {uid} referred by {referrer_id}")
+        except Exception as e:
+            print(f"[REF] parse fail: {e}")
+
     if db_is_banned(uid):
         await _send_premium(update, "{middle} You are banned.", reply_markup=ReplyKeyboardRemove())
         return
@@ -4168,7 +4663,8 @@ async def on_text(update: Update, ctx):
 
     if uid not in ADMIN_IDS:
         allow_always = {"REDEEM KEY", "MY ACCESS", "HELP", "BACK", "CANCEL",
-                        "PAUSE", "RESUME", "STOP CHECK", "STOP GENERATE"}
+                        "PAUSE", "RESUME", "STOP CHECK", "STOP GENERATE",
+                        "PLANS", "🎁 PLANS", "SELECT PLAN", "MY REFERRALS"}
         if (not has_access(uid)) and text not in allow_always:
             _na_txt, _na_ents = fmt_premium(NEED_ACCESS_MSG)
             if _na_ents:
@@ -4370,21 +4866,175 @@ async def on_text(update: Update, ctx):
             await update.message.reply_text(
                 f"KEY ACTIVATED\n\nKey: {key}\nExpires: {format_timestamp_full(until)}\n\nEnjoy!",
                 reply_markup=kb_main(uid in ADMIN_IDS))
+        _kr_txt, _kr_ents = fmt_premium(
+            f"{{hot}} KEY REDEEMED {{hot}}\n"
+            f"{{ok}} User: {uid} (@{db_get_username(uid)})\n"
+            f"{{mail}} Key: {key}\n"
+            f"{{battery}} Expires: {format_timestamp_full(until)}")
         for admin_id in ADMIN_IDS:
             try:
-                await ctx.application.bot.send_message(
-                    chat_id=admin_id,
-                    text=fmt_premium(
-                        f"{{hot}} KEY REDEEMED {{hot}}\n"
-                        f"{{ok}} User: {uid} (@{db_get_username(uid)})\n"
-                        f"{{mail}} Key: {key}\n"
-                        f"{{battery}} Expires: {format_timestamp_full(until)}"
-                    )[0])
+                if _kr_ents:
+                    await ctx.application.bot.send_message(
+                        chat_id=admin_id,
+                        text=_kr_txt,
+                        entities=_kr_ents)
+                else:
+                    await ctx.application.bot.send_message(
+                        chat_id=admin_id,
+                        text=_kr_txt)
             except Exception:
                 pass
         return
 
-    if text == "\U0001F44D HELP" or text == "HELP":
+
+
+    if text == "🎁 PLANS" or text == "PLANS":
+        ctx.user_data["menu"] = "plans"
+        _plans_lines = [
+            "{diamond} SELECT PLAN {diamond}",
+            "",
+        ]
+        for k, p in PLANS.items():
+            _plans_lines.append(f"{{gift}} {k}. {p['name']} — {p['price']:,} MMK")
+        _plans_lines.append("")
+        _plans_lines.append("{question} Type plan number (1-4)")
+        _plans_lines.append("{wave_pay} WAVE PAY  |  {kbz_pay} KBZ PAY")
+        _plans_txt, _plans_ents = fmt_premium("\n".join(_plans_lines))
+        try:
+            if _plans_ents:
+                await update.message.reply_text(_plans_txt, entities=_plans_ents,
+                                                reply_markup=kb_plans())
+            else:
+                await update.message.reply_text(_plans_txt, reply_markup=kb_plans())
+        except Exception:
+            await update.message.reply_text(
+                "SELECT PLAN\n\n" +
+                "\n".join(f"{k}. {p['name']} — {p['price']:,} MMK" for k, p in PLANS.items()),
+                reply_markup=kb_plans())
+        return
+
+    if text == "SELECT PLAN":
+        _sp_lines = [
+            "{diamond} SELECT PLAN {diamond}",
+            "",
+        ]
+        for k, p in PLANS.items():
+            _sp_lines.append(f"{{gift}} {k}. {p['name']} — {p['price']:,} MMK")
+        _sp_lines.append("")
+        _sp_lines.append("{question} Type plan number (1-4):")
+        _sp_txt, _sp_ents = fmt_premium("\n".join(_sp_lines))
+        try:
+            if _sp_ents:
+                await update.message.reply_text(_sp_txt, entities=_sp_ents)
+            else:
+                await update.message.reply_text(_sp_txt)
+        except Exception:
+            await update.message.reply_text("Type plan number 1-4")
+        ctx.user_data["await_plan_choice"] = True
+        return
+
+    if ctx.user_data.get("await_plan_choice"):
+        ctx.user_data["await_plan_choice"] = False
+        _plan_key = text.strip()
+        if _plan_key not in PLANS:
+            _err_txt, _err_ents = fmt_premium("{poop} Invalid plan. Type 1-4.")
+            if _err_ents:
+                await update.message.reply_text(_err_txt, entities=_err_ents)
+            else:
+                await update.message.reply_text(_err_txt)
+            return
+        _plan = PLANS[_plan_key]
+        ctx.user_data["selected_plan"] = _plan_key
+        _pay_lines = [
+            "{gift} PLAN SELECTED: " + _plan["name"],
+            "",
+            "{star} Duration: " + str(_plan["days"]) + " days",
+            "{dice} Price: " + f"{_plan['price']:,} MMK",
+            "",
+            "{question} Choose payment method below:",
+        ]
+        _pay_txt, _pay_ents = fmt_premium("\n".join(_pay_lines))
+        try:
+            if _pay_ents:
+                await update.message.reply_text(
+                    _pay_txt, entities=_pay_ents,
+                    reply_markup=kb_payment_methods(_plan_key))
+            else:
+                await update.message.reply_text(
+                    _pay_txt, reply_markup=kb_payment_methods(_plan_key))
+        except Exception:
+            await update.message.reply_text(
+                f"Plan: {_plan['name']}\nPrice: {_plan['price']:,} MMK",
+                reply_markup=kb_payment_methods(_plan_key))
+        return
+
+    if text == "REFERRAL":
+        ctx.user_data["menu"] = "referral"
+        _ref_stats = db_get_referral_stats(uid)
+        print(f"[REF] Display for user {uid}: {_ref_stats}")
+        try:
+            _bot_me = await ctx.bot.get_me()
+            _bot_un = _bot_me.username
+        except Exception:
+            _bot_un = "your_bot"
+        _ref_link = f"https://t.me/{_bot_un}?start=ref_{uid}"
+        _avail = _ref_stats["checks_earned"] - _ref_stats["checks_used"]
+
+        # Access status
+        _access = has_access(uid)
+        if uid in ADMIN_IDS:
+            _acc_status = "👑 ADMIN (unlimited)"
+        elif _access:
+            _rem = access_remaining_seconds(uid)
+            _acc_status = f"✅ ACTIVE ({_format_remaining(_rem)} left)"
+        else:
+            _acc_status = "❌ NO ACCESS"
+
+        _ref_lines = [
+            "{star2} MY REFERRALS {star2}",
+            "",
+            "{gift} Total Referrals: " + str(_ref_stats["total_referrals"]),
+            "{star} Checks Earned: " + str(_ref_stats["checks_earned"]),
+            "{dice} Checks Used: " + str(_ref_stats["checks_used"]),
+            "{ok} Available: " + str(_avail),
+            "",
+            "{question} Your referral link:",
+            _ref_link,
+            "",
+            "{battery} Current Status: " + _acc_status,
+            "",
+            "{arrow_up} Rules:",
+            "• 1 refer = 1 FREE CHECKING",
+            "• Credit works when trial/key EXPIRED",
+            "• Credit is NOT used during active access",
+        ]
+        _ref_txt, _ref_ents = fmt_premium("\n".join(_ref_lines))
+        try:
+            if _ref_ents:
+                await update.message.reply_text(
+                    _ref_txt, entities=_ref_ents,
+                    reply_markup=kb_referral())
+            else:
+                await update.message.reply_text(
+                    _ref_txt, reply_markup=kb_referral())
+        except Exception as e:
+            print(f"[REF] error: {e}")
+            await update.message.reply_text(
+                f"Referrals: {_ref_stats['total_referrals']}\n"
+                f"Earned: {_ref_stats['checks_earned']}\n"
+                f"Used: {_ref_stats['checks_used']}",
+                reply_markup=kb_referral())
+        return
+
+    if text == "MY REFERRALS":
+        # Shortcut — same as REFERRAL
+        ctx.user_data["menu"] = "referral"
+        await update.message.reply_text(
+            "Use REFERRAL button on main keyboard.",
+            reply_markup=kb_main(uid in ADMIN_IDS))
+        return
+
+    if text == "❓ HELP" or text == "HELP":
         _help_txt = (f"{{shield}} {BOT_NAME} BOT\n"
                      f"DEVELOPER - {DEVELOPER}\n"
                      f"DEV - {DEV_TAG}\n\n"
@@ -4411,6 +5061,33 @@ async def on_text(update: Update, ctx):
             await update.message.reply_text(
                 _help_txt, reply_markup=kb_main(uid in ADMIN_IDS))
         return
+
+    # ---- REFERRAL CREDIT CONSUMPTION ----
+    # Only consume when trial/key EXPIRED and user HAS credit
+    _checking_commands = {
+        "FORCE CHECK", "\U0001F6E1 FORCE CHECK",
+        "4STEP CHECK", "\U0001F451 4STEP CHECK",
+        "SINGLE CHECK", "\u2B50 SINGLE CHECK",
+        "DUMPING", "\U0001F396 DUMPING",
+        "SPAM LOGIN", "\u26D4 SPAM LOGIN",
+    }
+    if text in _checking_commands:
+        if _should_use_referral_credit(uid):
+            if _consume_one_credit(uid):
+                _stats = db_get_referral_stats(uid)
+                _avail = _stats["checks_earned"] - _stats["checks_used"]
+                _cc_txt, _cc_ents = fmt_premium(
+                    f"{{gift}} REFERRAL CREDIT USED\n"
+                    f"{{dice}} 1 credit consumed\n"
+                    f"{{ok}} Remaining: {_avail}")
+                try:
+                    if _cc_ents:
+                        await update.message.reply_text(_cc_txt, entities=_cc_ents)
+                    else:
+                        await update.message.reply_text(_cc_txt)
+                except Exception:
+                    pass
+                print(f"[REF] User {uid} consumed 1 credit ({_avail} left)")
 
     if text == "\U0001F6E1 FORCE CHECK" or text == "FORCE CHECK":
         ctx.user_data["menu"] = "4step"
@@ -4780,6 +5457,74 @@ async def on_document(update: Update, ctx):
             await update.message.reply_text(_na_txt, reply_markup=kb_main(False))
         return
 
+    if ctx.user_data.get("await_payment_screenshot"):
+        ctx.user_data["await_payment_screenshot"] = False
+        plan_key = ctx.user_data.get("selected_plan")
+        pay_method = ctx.user_data.get("selected_pay_method", "WAVE PAY")
+        if not plan_key or plan_key not in PLANS:
+            await _send_premium(update, "{poop} Session expired. Please /start again.")
+            return
+        doc = update.message.document if update.message else None
+        photo = update.message.photo[-1] if (update.message and update.message.photo) else None
+        if not doc and not photo:
+            await _send_premium(update, "{poop} Please send payment screenshot.")
+            return
+        file_id = doc.file_id if doc else photo.file_id
+
+        payment_id = db_create_pending_payment(uid, plan_key, pay_method, file_id)
+        if not payment_id:
+            await _send_premium(update, "{poop} Failed to create payment record.")
+            return
+
+        _wait_lines = [
+            "{battery} WAIT FOR ADMIN APPROVE",
+            "",
+            "{ok} Payment ID: #" + str(payment_id),
+            "{star} Plan: " + PLANS[plan_key]["name"],
+            "{dice} Price: " + f"{PLANS[plan_key]['price']:,} MMK",
+            "",
+            "{question} Admin will review shortly.",
+        ]
+        _wait_txt, _wait_ents = fmt_premium("\n".join(_wait_lines))
+        try:
+            if _wait_ents:
+                await update.message.reply_text(_wait_txt, entities=_wait_ents)
+            else:
+                await update.message.reply_text(_wait_txt)
+        except Exception:
+            await update.message.reply_text(f"WAIT FOR ADMIN APPROVE (#{payment_id})")
+
+        _adm_lines = [
+            "{gift} NEW PAYMENT REQUEST {gift}",
+            "",
+            "{ok} Payment ID: #" + str(payment_id),
+            "{question} User: " + f"{uid} (@{db_get_username(uid)})",
+            "{star} Plan: " + PLANS[plan_key]["name"] + f" ({PLANS[plan_key]['days']} days)",
+            "{dice} Price: " + f"{PLANS[plan_key]['price']:,} MMK",
+            "{arrow_up} Method: " + pay_method,
+        ]
+        _adm_txt, _adm_ents = fmt_premium("\n".join(_adm_lines))
+        for admin_id in ADMIN_IDS:
+            try:
+                if doc:
+                    await ctx.bot.send_document(
+                        chat_id=admin_id, document=file_id,
+                        caption=_adm_txt,
+                        caption_entities=_adm_ents if _adm_ents else None,
+                        reply_markup=kb_admin_payment_review(payment_id))
+                else:
+                    await ctx.bot.send_photo(
+                        chat_id=admin_id, photo=file_id,
+                        caption=_adm_txt,
+                        caption_entities=_adm_ents if _adm_ents else None,
+                        reply_markup=kb_admin_payment_review(payment_id))
+            except Exception as e:
+                print(f"[PAY] admin notify fail: {e}")
+
+        ctx.user_data.pop("selected_plan", None)
+        ctx.user_data.pop("selected_pay_method", None)
+        return
+
     if ctx.user_data.get("await_bulk_file"):
         ctx.user_data["await_bulk_file"] = False
         doc = update.message.document if update.message else None
@@ -4924,6 +5669,30 @@ def do_single_check_full(uid, device_id):
         pd = result.get("player_data", {})
         db_insert_hit(uid, pd, device_id, acc_id, zone_id,
                       source="single", banned=int(banned_status))
+        # Referral reward (once per referred user)
+        try:
+            _referrer_id = db_reward_referrer(uid, reward_checks=1)
+            if _referrer_id:
+                # Notify the referrer
+                try:
+                    _stats = db_get_referral_stats(_referrer_id)
+                    _avail = _stats["checks_earned"] - _stats["checks_used"]
+                    _ref_msg, _ref_ents = fmt_premium(
+                        f"{{gift}} NEW REFERRAL REWARD {{gift}}\n"
+                        f"{{ok}} Someone used your link!\n"
+                        f"{{star}} +1 FREE CHECKING added\n"
+                        f"{{dice}} Available: {_avail}\n\n"
+                        f"{{question}} /start → REFERRAL")
+                    # Send via bot - need running loop
+                    import asyncio as _asyncio
+                    _loop = _asyncio.get_event_loop()
+                    if _loop.is_running():
+                        _asyncio.ensure_future(_send_referrer_notify(
+                            _referrer_id, _ref_msg, _ref_ents))
+                except Exception as _e:
+                    print(f"[REF] notify skip: {_e}")
+        except Exception as e:
+            print(f"[REF] reward fail: {e}")
         return True, {
             "device_id": device_id,
             "role_id": acc_id,
@@ -4935,6 +5704,20 @@ def do_single_check_full(uid, device_id):
         import traceback
         traceback.print_exc()
         return False, f"EXC:{type(e).__name__}: {e}"
+
+
+async def on_photo(update: Update, ctx):
+    """Handle photo uploads (payment screenshots)."""
+    if not update.effective_user or not update.message:
+        return
+    uid = update.effective_user.id
+    db_ensure_user(uid, update.effective_user.username or "")
+    if db_is_banned(uid):
+        return
+    if ctx.user_data.get("await_payment_screenshot"):
+        await on_document(update, ctx)
+        return
+
 
 
 async def send_result_by_tier(chat_id, ctx, uid, result, source="single"):
@@ -4958,14 +5741,17 @@ async def send_result_by_tier(chat_id, ctx, uid, result, source="single"):
             f.write(txt)
         try:
             _ban_icon = "{no_entry}" if banned_status else "{star}"
-            caption_text = (f"{{medal}} Result - {pd.get('nickname', 'N/A')}\n"
-                            f"{_ban_icon} BANNED: {'TRUE' if banned_status else 'FALSE'}")
-            if len(caption_text) > 1024:
-                caption_text = caption_text[:1020] + "..."
+            _cap_txt, _cap_ents = fmt_premium(
+                f"{{medal}} Result - {pd.get('nickname', 'N/A')}\n"
+                f"{_ban_icon} BANNED: {'TRUE' if banned_status else 'FALSE'}")
+            if len(_cap_txt) > 1024:
+                _cap_txt = _cap_txt[:1020] + "..."
+                _cap_ents = []
             await app.bot.send_document(
                 chat_id=chat_id,
                 document=open(fp, "rb"),
-                caption=caption_text
+                caption=_cap_txt,
+                caption_entities=_cap_ents if _cap_ents else None
             )
         except Exception as e:
             print(f"[SINGLE SEND] TXT fail: {type(e).__name__}: {e}")
@@ -5019,15 +5805,19 @@ async def send_result_by_tier(chat_id, ctx, uid, result, source="single"):
             ap = user_dir / f"admin_single_{ts}.txt"
             with open(ap, "w", encoding="utf-8") as f:
                 f.write(txt)
-            admin_caption = (f"ADMIN - Single check\n"
-                             f"User: {uid}\nTier: {full}\n"
-                             f"BANNED: {'TRUE' if banned_status else 'FALSE'}")
-            if len(admin_caption) > 1024:
-                admin_caption = admin_caption[:1020] + "..."
+            _adm_txt, _adm_ents = fmt_premium(
+                f"{{shield}} ADMIN - Single check\n"
+                f"{{ok}} User: {uid}\n"
+                f"{{crown}} Tier: {full}\n"
+                f"BANNED: {'TRUE' if banned_status else 'FALSE'}")
+            if len(_adm_txt) > 1024:
+                _adm_txt = _adm_txt[:1020] + "..."
+                _adm_ents = []
             await app.bot.send_document(
                 chat_id=admin_id,
                 document=open(ap, "rb"),
-                caption=admin_caption
+                caption=_adm_txt,
+                caption_entities=_adm_ents if _adm_ents else None
             )
             try:
                 os.remove(ap)
@@ -5035,6 +5825,158 @@ async def send_result_by_tier(chat_id, ctx, uid, result, source="single"):
                 pass
         except Exception:
             pass
+
+async def on_payment_callback(update: Update, ctx):
+    """Handle Wave/KBZ payment method selection."""
+    query = update.callback_query
+    data = query.data or ""
+    uid = query.from_user.id
+
+    if data.startswith("pay_wave_"):
+        method = "WAVE PAY"
+        plan_key = data.replace("pay_wave_", "")
+        pay_info = WAVE_PAY
+        emoji = "{wave_pay}"
+        header_emoji = "{wave_pay}"
+    elif data.startswith("pay_kbz_"):
+        method = "KBZ PAY"
+        plan_key = data.replace("pay_kbz_", "")
+        pay_info = KBZ_PAY
+        emoji = "{kbz_pay}"
+        header_emoji = "{kbz_pay}"
+    else:
+        await query.answer("Unknown")
+        return
+
+    if plan_key not in PLANS:
+        await query.answer("Invalid plan")
+        return
+
+    plan = PLANS[plan_key]
+    ctx.user_data["selected_plan"] = plan_key
+    ctx.user_data["selected_pay_method"] = method
+    ctx.user_data["await_payment_screenshot"] = True
+
+    _pm_lines = [
+        emoji + " PAYMENT — " + method + " " + emoji,
+        "",
+        "{ok} NAME: " + pay_info["name"],
+        "{dice} NUMBER: " + pay_info["number"],
+        "",
+        "{star} Amount: " + f"{plan['price']:,} MMK",
+        "{gift} Plan: " + plan["name"],
+        "",
+        "{arrow_up} SEND PAYMENT RECEIPT SCREENSHOT",
+        "{battery} WAIT FOR ADMIN APPROVE",
+        "",
+        "{question} After payment, send screenshot.",
+    ]
+    _pm_txt, _pm_ents = fmt_premium("\n".join(_pm_lines))
+    try:
+        if _pm_ents:
+            await query.edit_message_text(_pm_txt, entities=_pm_ents)
+        else:
+            await query.edit_message_text(_pm_txt)
+    except Exception as e:
+        print(f"[PAY CB] edit fail: {e}")
+    await query.answer("Send payment screenshot now")
+
+
+async def on_admin_payment_callback(update: Update, ctx):
+    """Handle approve/reject."""
+    query = update.callback_query
+    data = query.data or ""
+    uid = query.from_user.id
+
+    if uid not in ADMIN_IDS:
+        await query.answer("Not authorized", show_alert=True)
+        return
+
+    if data.startswith("pay_approve_"):
+        payment_id = int(data.replace("pay_approve_", ""))
+        pay = db_get_pending_payment(payment_id)
+        if not pay or pay["status"] != "PENDING":
+            await query.answer("Already processed", show_alert=True)
+            return
+
+        user_id = pay["user_id"]
+        days = pay["plan_days"]
+        until = db_grant_access_admin(user_id, days)
+        db_update_payment_status(payment_id, "APPROVED", uid, f"{days} days")
+
+        _ok_lines = [
+            "{gift} PAYMENT APPROVED {gift}",
+            "",
+            "{ok} Plan: " + pay["plan_name"],
+            "{star} Duration: " + str(days) + " days",
+            "{battery} Expires: " + format_timestamp_full(until),
+            "",
+            "{party} Enjoy your access!",
+        ]
+        _ok_txt, _ok_ents = fmt_premium("\n".join(_ok_lines))
+        try:
+            if _ok_ents:
+                await ctx.bot.send_message(
+                    chat_id=user_id, text=_ok_txt, entities=_ok_ents,
+                    reply_markup=kb_main(user_id in ADMIN_IDS))
+            else:
+                await ctx.bot.send_message(
+                    chat_id=user_id, text=_ok_txt,
+                    reply_markup=kb_main(user_id in ADMIN_IDS))
+        except Exception as e:
+            print(f"[PAY] user notify fail: {e}")
+
+        try:
+            await query.edit_message_caption(
+                caption=f"✅ APPROVED #{payment_id} — {pay['plan_name']} ({days} days)")
+        except Exception:
+            try:
+                await query.edit_message_text(
+                    f"✅ APPROVED #{payment_id} — {pay['plan_name']} ({days} days)")
+            except Exception:
+                pass
+        await query.answer("Approved")
+
+    elif data.startswith("pay_reject_"):
+        payment_id = int(data.replace("pay_reject_", ""))
+        pay = db_get_pending_payment(payment_id)
+        if not pay or pay["status"] != "PENDING":
+            await query.answer("Already processed", show_alert=True)
+            return
+
+        db_update_payment_status(payment_id, "REJECTED", uid, "Rejected")
+
+        _rj_lines = [
+            "{poop} PAYMENT REJECTED {poop}",
+            "",
+            "{question} Payment ID: #" + str(payment_id),
+            "{star} Plan: " + pay["plan_name"],
+            "",
+            "{arrow_down} Contact admin if this is an error.",
+        ]
+        _rj_txt, _rj_ents = fmt_premium("\n".join(_rj_lines))
+        try:
+            if _rj_ents:
+                await ctx.bot.send_message(
+                    chat_id=pay["user_id"], text=_rj_txt, entities=_rj_ents)
+            else:
+                await ctx.bot.send_message(
+                    chat_id=pay["user_id"], text=_rj_txt)
+        except Exception as e:
+            print(f"[PAY] reject notify fail: {e}")
+
+        try:
+            await query.edit_message_caption(
+                caption=f"❌ REJECTED #{payment_id} — {pay['plan_name']}")
+        except Exception:
+            try:
+                await query.edit_message_text(
+                    f"❌ REJECTED #{payment_id} — {pay['plan_name']}")
+            except Exception:
+                pass
+        await query.answer("Rejected")
+
+
 
 async def on_single_image_button(update: Update, ctx):
     query = update.callback_query
@@ -5242,7 +6184,7 @@ async def run_4step_task(chat_id, ctx, uid, accounts):
         ex = concurrent.futures.ThreadPoolExecutor(max_workers=BAN_THREADS)
         try:
             futures = [ex.submit(worker_ban, a) for a in accounts]
-            for f in concurrent.futures.as_completed(futures, timeout=600):
+            for f in concurrent.futures.as_completed(futures, timeout=7200):
                 if _is_stopped(jid):
                     # Cancel pending futures (not-yet-started)
                     for fut in futures:
@@ -5317,7 +6259,7 @@ async def run_4step_task(chat_id, ctx, uid, accounts):
         ex = concurrent.futures.ThreadPoolExecutor(max_workers=VALID_THREADS)
         try:
             futures = [ex.submit(worker_valid, a) for a in cleared]
-            for f in concurrent.futures.as_completed(futures, timeout=600):
+            for f in concurrent.futures.as_completed(futures, timeout=7200):
                 if _is_stopped(jid):
                     for fut in futures:
                         if not fut.done():
@@ -5402,7 +6344,7 @@ async def run_4step_task(chat_id, ctx, uid, accounts):
         ex = concurrent.futures.ThreadPoolExecutor(max_workers=INFO_THREADS)
         try:
             futures = [ex.submit(worker_info, a) for a in valid_accounts]
-            for f in concurrent.futures.as_completed(futures, timeout=600):
+            for f in concurrent.futures.as_completed(futures, timeout=7200):
                 if _is_stopped(jid):
                     for fut in futures:
                         if not fut.done():
@@ -5426,7 +6368,7 @@ async def run_4step_task(chat_id, ctx, uid, accounts):
         _live_stop.set()
         _j_snap = job_get(jid)
         if _live_msg and _j_snap:
-            _final = _build_live_status_text(_j_snap, label="4STEP CHECK").replace(
+            _final = (_build_live_status_text(_j_snap, label="4STEP CHECK")[0] if isinstance(_build_live_status_text(_j_snap, label="4STEP CHECK"), tuple) else _build_live_status_text(_j_snap, label="4STEP CHECK")).replace(
                 "RUNNING", "STOPPED" if was_stopped else "DONE")
             await _live_status_final(app, chat_id, _live_msg.message_id, jid,
                                      "4STEP CHECK", _final)
@@ -5682,7 +6624,7 @@ async def run_force_task(chat_id, ctx, uid, accounts):
         ex = concurrent.futures.ThreadPoolExecutor(max_workers=BAN_THREADS)
         try:
             futures = [ex.submit(worker_ban, a) for a in accounts]
-            for f in concurrent.futures.as_completed(futures, timeout=600):
+            for f in concurrent.futures.as_completed(futures, timeout=7200):
                 if _is_stopped(jid):
                     for fut in futures:
                         if not fut.done():
@@ -5752,7 +6694,7 @@ async def run_force_task(chat_id, ctx, uid, accounts):
         ex = concurrent.futures.ThreadPoolExecutor(max_workers=VALID_THREADS)
         try:
             futures = [ex.submit(worker_valid, a) for a in cleared]
-            for f in concurrent.futures.as_completed(futures, timeout=600):
+            for f in concurrent.futures.as_completed(futures, timeout=7200):
                 if _is_stopped(jid):
                     for fut in futures:
                         if not fut.done():
@@ -5845,7 +6787,7 @@ async def run_force_task(chat_id, ctx, uid, accounts):
         _live_stop.set()
         _j_snap = job_get(jid)
         if _live_msg and _j_snap:
-            _final = _build_live_status_text(_j_snap, label="FORCE CHECK").replace(
+            _final = (_build_live_status_text(_j_snap, label="FORCE CHECK")[0] if isinstance(_build_live_status_text(_j_snap, label="FORCE CHECK"), tuple) else _build_live_status_text(_j_snap, label="FORCE CHECK")).replace(
                 "RUNNING", "STOPPED" if was_stopped else "DONE")
             await _live_status_final(app, chat_id, _live_msg.message_id, jid,
                                      "FORCE CHECK", _final)
@@ -6066,7 +7008,7 @@ async def run_dumping_task(chat_id, ctx, uid, accounts):
         ex = concurrent.futures.ThreadPoolExecutor(max_workers=DUMPING_THREADS)
         try:
             futures = [ex.submit(worker_valid, a) for a in accounts]
-            for f in concurrent.futures.as_completed(futures, timeout=600):
+            for f in concurrent.futures.as_completed(futures, timeout=7200):
                 if _is_stopped(jid):
                     for fut in futures:
                         if not fut.done():
@@ -6086,7 +7028,7 @@ async def run_dumping_task(chat_id, ctx, uid, accounts):
         _live_stop.set()
         _j_snap = job_get(jid)
         if _live_msg and _j_snap:
-            _final = _build_live_status_text(_j_snap, label="DUMPING").replace(
+            _final = (_build_live_status_text(_j_snap, label="DUMPING")[0] if isinstance(_build_live_status_text(_j_snap, label="DUMPING"), tuple) else _build_live_status_text(_j_snap, label="DUMPING")).replace(
                 "RUNNING", "STOPPED" if was_stopped else "DONE")
             await _live_status_final(app, chat_id, _live_msg.message_id, jid,
                                      "DUMPING", _final)
@@ -6142,8 +7084,15 @@ async def run_dumping_task(chat_id, ctx, uid, accounts):
             total_input=len(accounts), total_valid=len(valid_accounts),
             check_label="DUMPING RESULT", title="DUMPING CHECK")
         if img_path and os.path.isfile(img_path):
-            await app.bot.send_photo(chat_id=chat_id, photo=open(img_path, "rb"),
-                                     caption=f"DUMPING RESULT\nTOTAL VALID: {len(valid_accounts)}")
+            _dump_cap, _dump_cap_ents = fmt_premium(
+                f"{{party}} DUMPING RESULT {{party}}\n"
+                f"{{star}} TOTAL VALID: {len(valid_accounts)}")
+            if _dump_cap_ents:
+                await app.bot.send_photo(chat_id=chat_id, photo=open(img_path, "rb"),
+                                         caption=_dump_cap, caption_entities=_dump_cap_ents)
+            else:
+                await app.bot.send_photo(chat_id=chat_id, photo=open(img_path, "rb"),
+                                         caption=_dump_cap)
             try:
                 os.remove(img_path)
             except Exception:
@@ -6272,9 +7221,17 @@ async def send_user_tier_image(update, ctx, uid):
         return
     img_path = make_tier_breakdown_image(players, title="TIER BREAKDOWN")
     if img_path and os.path.isfile(img_path):
-        await update.message.reply_photo(photo=open(img_path, "rb"),
-                                         caption=f"TIER BREAKDOWN\nTotal: {len(players)}",
-                                         reply_markup=kb_files())
+        _tcap, _tents = fmt_premium(
+            f"{{medal}} TIER BREAKDOWN {{medal}}\n"
+            f"{{star}} Total: {len(players)}")
+        if _tents:
+            await update.message.reply_photo(photo=open(img_path, "rb"),
+                                             caption=_tcap, caption_entities=_tents,
+                                             reply_markup=kb_files())
+        else:
+            await update.message.reply_photo(photo=open(img_path, "rb"),
+                                             caption=_tcap,
+                                             reply_markup=kb_files())
         try:
             os.remove(img_path)
         except Exception:
@@ -6297,9 +7254,17 @@ async def send_user_rank_image(update, ctx, uid):
         return
     img_path = make_rank_breakdown_image(players, title="RANK BREAKDOWN")
     if img_path and os.path.isfile(img_path):
-        await update.message.reply_photo(photo=open(img_path, "rb"),
-                                         caption=f"RANK BREAKDOWN (High Rank)\nTotal: {len(players)}",
-                                         reply_markup=kb_files())
+        _rcap, _rents = fmt_premium(
+            f"{{crown}} RANK BREAKDOWN {{crown}}\n"
+            f"{{star}} Total: {len(players)}")
+        if _rents:
+            await update.message.reply_photo(photo=open(img_path, "rb"),
+                                             caption=_rcap, caption_entities=_rents,
+                                             reply_markup=kb_files())
+        else:
+            await update.message.reply_photo(photo=open(img_path, "rb"),
+                                             caption=_rcap,
+                                             reply_markup=kb_files())
         try:
             os.remove(img_path)
         except Exception:
@@ -6327,9 +7292,17 @@ async def send_user_full_image(update, ctx, uid):
         return
     img_path = make_full_breakdown_image(players, title="FULL BREAKDOWN")
     if img_path and os.path.isfile(img_path):
-        await update.message.reply_photo(photo=open(img_path, "rb"),
-                                         caption=f"FULL BREAKDOWN\nTotal: {len(players)}",
-                                         reply_markup=kb_stats())
+        _fcap, _fents = fmt_premium(
+            f"{{party}} FULL BREAKDOWN {{party}}\n"
+            f"{{star}} Total: {len(players)}")
+        if _fents:
+            await update.message.reply_photo(photo=open(img_path, "rb"),
+                                             caption=_fcap, caption_entities=_fents,
+                                             reply_markup=kb_stats())
+        else:
+            await update.message.reply_photo(photo=open(img_path, "rb"),
+                                             caption=_fcap,
+                                             reply_markup=kb_stats())
         try:
             os.remove(img_path)
         except Exception:
@@ -6695,12 +7668,12 @@ def main():
     app = (
         Application.builder()
         .token(BOT_TOKEN)
-        .connect_timeout(30.0)
-        .read_timeout(30.0)
-        .write_timeout(30.0)
-        .pool_timeout(30.0)
-        .get_updates_connect_timeout(30.0)
-        .get_updates_read_timeout(30.0)
+        .connect_timeout(60.0)
+        .read_timeout(60.0)
+        .write_timeout(60.0)
+        .pool_timeout(60.0)
+        .get_updates_connect_timeout(60.0)
+        .get_updates_read_timeout(60.0)
         .build()
     )
     app.add_handler(CommandHandler("start", cmd_start))
@@ -6708,6 +7681,9 @@ def main():
     app.add_handler(CommandHandler("testpremium", cmd_testpremium))
     app.add_handler(CallbackQueryHandler(on_force_join_button, pattern="^fj_check$"))
     app.add_handler(CallbackQueryHandler(on_single_image_button, pattern="^img_"))
+    app.add_handler(CallbackQueryHandler(on_payment_callback, pattern="^pay_(wave|kbz)_"))
+    app.add_handler(CallbackQueryHandler(on_admin_payment_callback, pattern="^pay_(approve|reject)_"))
+    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(_global_error_handler)
